@@ -24,11 +24,14 @@ fe2:
 
 fe2obj:
 	as68k/as68k --output-c fe2.s
+	# -fcommon: _host.c (included in both parts) has unguarded global
+	# variable definitions, which the linker merges only if they are
+	# common symbols (pre-GCC10 default).
 	# this bit can be optimised because it is lots of small functions
-	$(CC) -DPART1 -O1 -fomit-frame-pointer -Wall -Wno-unused -s `sdl-config --cflags` -c fe2.s.c -o fe2.part1.o
+	$(CC) -fcommon -DPART1 -O1 -fomit-frame-pointer -Wall -Wno-unused -s `sdl-config --cflags` -c fe2.s.c -o fe2.part1.o
 	# this can't unless you have shitloads of memory and a meaty
 	# machine, because it is a huge stinking function.
-	$(CC) -DPART2 -O0 -fomit-frame-pointer -Wall -Wno-unused -s `sdl-config --cflags` -c fe2.s.c -o fe2.part2.o
+	$(CC) -fcommon -DPART2 -O0 -fomit-frame-pointer -Wall -Wno-unused -s `sdl-config --cflags` -c fe2.s.c -o fe2.part2.o
 
 clean:
 	$(MAKE) -C src/ clean
