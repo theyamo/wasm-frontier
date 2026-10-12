@@ -32,6 +32,11 @@
 #include "keymap.h"
 #include "shortcut.h"
 
+#ifdef __EMSCRIPTEN__
+/* wasm/shim.c: flush the save files to IndexedDB after they change. */
+extern void wasm_fs_sync (void);
+#endif
+
 /*
   GEMDOS error codes, See 'The Atari Compendium' D.3
   Call_Fread, Fwrite, etc should return these.
@@ -744,6 +749,9 @@ static void Call_Fdelete ()
 	}
 
 	SetReg (REG_D0, remove (filename));
+#ifdef __EMSCRIPTEN__
+	wasm_fs_sync ();
+#endif
 }
 
 static void Call_Fwrite ()
@@ -765,6 +773,9 @@ static void Call_Fwrite ()
 	} else {
 		SetReg (REG_D0, fwrite (STRam+pBuf, 1, len, f));
 		fclose (f);
+#ifdef __EMSCRIPTEN__
+		wasm_fs_sync ();
+#endif
 	}
 }
 	

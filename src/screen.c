@@ -134,6 +134,14 @@ void Screen_Init(void)
 {
 	change_vidmode ();
 	
+#ifdef __EMSCRIPTEN__
+	/* wasm port: the legacy-GL 3D renderer (R_GL/R_GLWIRE) is not ported
+	 * to WebGL yet, so run the game's own software renderer and just
+	 * display the 320x200 framebuffer (see wasm/shim.c). F12 can still
+	 * toggle renderers, but only R_OLD draws until the WebGL phase. */
+	use_renderer = R_OLD;
+#endif
+
 	qobj = gluNewQuadric ();
 
 	tobj = gluNewTess ();
@@ -239,10 +247,16 @@ static const unsigned char font_bmp[] = {
 
 static int DrawChar (int col, int xoffset, char *scrline, int chr)
 {
-	const char *font_pos;
+	const unsigned char *font_pos;
 	char *pix;
 	int i;
 	
+	/* wasm port: keep the glyph lookup inside the table. The table holds
+	 * fewer than 128 glyphs, so a high character index used to read past
+	 * its end — harmless on x86, a memory trap under wasm. */
+	if (chr < 0 || chr >= (int) (sizeof (font_bmp) / 10))
+		chr = 0x1f;			/* '?' */
+
 	font_pos = font_bmp;
 	font_pos += (chr&0xff)*10;
 	scrline += xoffset;
@@ -294,7 +308,7 @@ int queued_string_pos;
 void Nu_QueueDrawStr ()
 {
 	assert (queued_string_pos < MAX_QUEUED_STRINGS);
-	strncpy (queued_strings[queued_string_pos].str, GetReg (REG_A0) + STRam, 64);
+	strncpy ((char *) queued_strings[queued_string_pos].str, GetReg (REG_A0) + STRam, 64);
 	queued_strings[queued_string_pos].x = GetReg (REG_D1);
 	queued_strings[queued_string_pos].y = GetReg (REG_D2);
 	queued_strings[queued_string_pos++].col = GetReg (REG_D0);
@@ -304,6 +318,26 @@ int DrawStr (int xpos, int ypos, int col, unsigned char *str, bool shadowed)
 {
 	int x, y, chr;
 	char *screen;
+
+/* #ifdef __EMSCRIPTEN__ */
+#if 0
+	/* wasm port debug aid: log the text the guest draws (its only way of
+	 * reporting errors is on screen) */
+	{
+		const unsigned char *p = str;
+		int guard = 0;
+		fprintf (stderr, "guest-text: ");
+		while (*p && guard++ < 80) {
+			unsigned char c = *p++;
+			if (c >= 0x20 && c < 0x7f) fputc (c, stderr);
+			else if (c == '\r') fputc ('\n', stderr), fprintf (stderr, "guest-text: ");
+			else if (c == 1) p++;
+			else if (c == 0x1e) p++;
+			else if (c < 0x20) p += 2;
+		}
+		fputc ('\n', stderr);
+	}
+#endif
 
 	x = xpos;
 	y = ypos;
@@ -798,8 +832,8 @@ static void lighting_on (float light_vec[4], int rgb444_light_col, int rgb444_ex
 		glColor3ui (obj_col[0], obj_col[1], obj_col[2]);
 	} else {
 		glLightfv (GL_LIGHT0, GL_POSITION, light_vec);
-		glLightiv (GL_LIGHT0, GL_DIFFUSE, light_col);
-		glLightiv (GL_LIGHT0, GL_AMBIENT, obj_col);
+		glLightiv (GL_LIGHT0, GL_DIFFUSE, (const GLint *) light_col);
+		glLightiv (GL_LIGHT0, GL_AMBIENT, (const GLint *) obj_col);
 		glEnable (GL_LIGHTING);
 		glEnable (GL_LIGHT0);
 	}
@@ -1467,8 +1501,8 @@ void Nu_DrawPlanet (void **data)
 	
 	glLightfv (GL_LIGHT1, GL_POSITION, light_vec);
 
-	glLightiv (GL_LIGHT1, GL_DIFFUSE, light_col);
-	glLightiv (GL_LIGHT1, GL_AMBIENT, obj_col);
+	glLightiv (GL_LIGHT1, GL_DIFFUSE, (const GLint *) light_col);
+	glLightiv (GL_LIGHT1, GL_AMBIENT, (const GLint *) obj_col);
 
 //	glMaterialiv (GL_FRONT, GL_AMBIENT, obj_col);
 	glEnable (GL_LIGHTING);

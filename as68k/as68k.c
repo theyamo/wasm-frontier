@@ -2238,7 +2238,7 @@ int main (int argc, char **argv)
 	int arg, size, num;
 	char bin_filename[128];
 	if (argc == 1) {
-		fprintf (stderr, "Usage: ./as68k [--dump-labels] [--output-c | --output-i386] file.s\n");
+		fprintf (stderr, "Usage: ./as68k [--dump-labels] [--output-c | --output-i386 | --output-cfunc] file.s\n");
 		exit (0);
 	}
 	
@@ -2254,6 +2254,13 @@ int main (int argc, char **argv)
 		else if (strcmp (argv[arg], "--output-i386") == 0) {
 			comp = &compiler[COMPILE_i386];
 			output_c = 1;
+		}
+		else if (strcmp (argv[arg], "--output-cfunc") == 0) {
+			/* same instruction emitters as --output-c, but emit one
+			 * C function per basic block plus a dispatch loop. */
+			comp = &compiler[COMPILE_C];
+			output_c = 1;
+			c_block_mode = 1;
 		}
 		else {
 			fprintf (stderr, "Unknown option: '%s'\n", argv[arg]);

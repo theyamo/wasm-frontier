@@ -56,6 +56,16 @@ void ShortCut_ClearKeys(void)
 */
 void ShortCut_CheckKeys(void)
 {
+  /* wasm port debug: the shortcut path can call SDL_Quit()/exit(), which
+   * on wasm silently unwinds the interpreter loop (emscripten swallows
+   * the ExitStatus), so log it. */
+#ifdef __EMSCRIPTEN__
+  if (ShortCutKey.Key)
+    fprintf (stderr, "shortcut: Key=%d ($%x) ctrl=%d shift=%d\n",
+             ShortCutKey.Key, ShortCutKey.Key,
+             ShortCutKey.bCtrlPressed, ShortCutKey.bShiftPressed);
+#endif
+
   /* Check for supported keys: */
   switch(ShortCutKey.Key) {
      case SDLK_F11:                  /* Switch between fullscreen/windowed mode */

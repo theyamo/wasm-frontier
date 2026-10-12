@@ -10,6 +10,10 @@ default:
 	$(MAKE) -f $(THIS) fe2obj
 	$(MAKE) -C src/
 
+.PHONY: wasm
+wasm:
+	./build-wasm.sh
+
 fe2clean:
 	rm -f fe2.s.bin
 	rm -f fe2.part1.o
@@ -23,15 +27,20 @@ fe2:
 	$(MAKE) -C src/
 
 fe2obj:
-	as68k/as68k --output-c fe2.s
+	as68k/as68k --output-cfunc fe2.s
 	# -fcommon: _host.c (included in both parts) has unguarded global
 	# variable definitions, which the linker merges only if they are
 	# common symbols (pre-GCC10 default).
+	# -fwrapv: the generated instruction emitters rely on signed 32-bit
+	# wraparound (e.g. add.l dn,dn derives V from dest+src). That is
+	# signed-overflow UB, and at -O1+ the compiler may constant-fold the
+	# flag away (clang folded V to 0 for add.l dn,dn). -fwrapv makes the
+	# wraparound explicit, so any optimisation level is safe.
 	# this bit can be optimised because it is lots of small functions
-	$(CC) -fcommon -DPART1 -O1 -fomit-frame-pointer -Wall -Wno-unused -s `sdl-config --cflags` -c fe2.s.c -o fe2.part1.o
+	$(CC) -fcommon -DPART1 -O1 -fwrapv -fomit-frame-pointer -Wall -Wno-unused -s `sdl-config --cflags` -c fe2.s.c -o fe2.part1.o
 	# this can't unless you have shitloads of memory and a meaty
 	# machine, because it is a huge stinking function.
-	$(CC) -fcommon -DPART2 -O0 -fomit-frame-pointer -Wall -Wno-unused -s `sdl-config --cflags` -c fe2.s.c -o fe2.part2.o
+	$(CC) -fcommon -DPART2 -O0 -fwrapv -fomit-frame-pointer -Wall -Wno-unused -s `sdl-config --cflags` -c fe2.s.c -o fe2.part2.o
 
 clean:
 	$(MAKE) -C src/ clean

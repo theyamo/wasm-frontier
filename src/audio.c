@@ -13,6 +13,13 @@
 #include "audio.h"
 #include "../m68000.h"
 
+#ifdef __EMSCRIPTEN__
+/* Provided by wasm/shim.c: hands an SFX (sample index + channel) to the
+ * WebAudio backend, which plays it directly. The software mixer below is
+ * unused in the wasm build. */
+extern int wasm_play_sfx (int sample, int channel);
+#endif
+
 #ifdef OGG_MUSIC
 # include <vorbis/codec.h>
 # include <vorbis/vorbisfile.h>
@@ -161,11 +168,15 @@ void Call_PlaySFX ()
 {
 	int sample, chan;
 
-	SDL_LockAudio ();
-	
 	sample = (short) GetReg (REG_D0);
 	chan = (short) GetReg (REG_D1);
 	//printf ("Playing sample %d on channel %d.\n", sample, chan);
+
+#ifdef __EMSCRIPTEN__
+	/* The wasm build plays the WAV directly through WebAudio. */
+	wasm_play_sfx (sample, chan);
+#else
+	SDL_LockAudio ();
 
 	wav_channels[chan].buf_pos = 0;
 	wav_channels[chan].buf_len = sfx_buf[sample].buf_len;
@@ -173,6 +184,7 @@ void Call_PlaySFX ()
 	wav_channels[chan].loop = sfx_buf[sample].loop;
 
 	SDL_UnlockAudio ();
+#endif
 }
 
 /*-----------------------------------------------------------------------*/
@@ -286,6 +298,12 @@ void check_sample_format (SDL_AudioSpec *spec, Uint8 **buf, int *len, const char
 */
 void Audio_Init(void)
 {
+#ifdef __EMSCRIPTEN__
+	/* SFX are decoded and played by the WebAudio shim (wasm_play_sfx);
+	 * there is no SDL audio device or software mixer in the wasm build. */
+	bSoundWorking = TRUE;
+	return;
+#else
 	int i;
 	char filename[32];
   SDL_AudioSpec desiredAudioSpec;    /* We fill in the desired SDL audio options here */
@@ -347,6 +365,7 @@ void Audio_Init(void)
   bSoundWorking = TRUE;
   /* And begin */
   Audio_EnableAudio(TRUE);
+#endif /* __EMSCRIPTEN__ */
 }
 
 

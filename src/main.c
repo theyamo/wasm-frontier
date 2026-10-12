@@ -214,6 +214,9 @@ void Main_Init(void)
 */
 void Main_UnInit(void)
 {
+#ifdef __EMSCRIPTEN__
+  fprintf (stderr, "diag: Main_UnInit reached (emulator loop returned)\n");
+#endif
   Audio_UnInit();
   Screen_UnInit();
 
@@ -242,7 +245,9 @@ void sig_handler (int signum)
 */
 int main(int argc, char *argv[])
 {
+#ifndef __EMSCRIPTEN__
   signal (SIGSEGV, sig_handler);
+#endif /* __EMSCRIPTEN__ */
 	
   /* Generate random seed */
   srand( time(NULL) );
@@ -262,6 +267,9 @@ int main(int argc, char *argv[])
   /* Run emulation */
   Main_UnPauseEmulation();
   Start680x0();                 /* Start emulation */
+#ifndef __EMSCRIPTEN__
+  fprintf (stderr, "native: Start680x0 returned - the guest program ended\n");
+#endif
 
   /* Un-init emulation system */
   Main_UnInit();

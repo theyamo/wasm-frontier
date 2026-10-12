@@ -24,10 +24,59 @@ typedef signed int s32;
 typedef signed short s16;
 typedef signed char s8;
 
+/* wasm (emscripten) port: yield hooks for the emulator loop,
+ * defined in wasm/shim.c. See build-wasm.sh. */
+#ifdef __EMSCRIPTEN__
+extern int wasm_yield_cnt;
+extern void wasm_68k_entry (void);
+extern int wasm_68k_yield_check (void);
+extern void wasm_68k_trace (int jdest);
+extern int wasm_68k_vbl (void);
+extern void wasm_68k_end_of_switch (void);
+extern void wasm_68k_bad_jump (int jdest, int rdest);
+extern void wasm_68k_shouldnt_get_here (void);
+#endif /* __EMSCRIPTEN__ */
+
+/*
+ * Host byte order, used by the do_get/put_mem_* helpers below.
+ *
+ * This used to test plain "LITTLE_ENDIAN", which only happens to be
+ * defined because a system header leaks it in on glibc; the wasm build
+ * (musl/emscripten) does not define it, so every 68k word was read
+ * without a byte swap and the loader blew up on the big-endian Atari
+ * .prg header. Prefer the compiler's own builtin.
+ */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+#  define HOST_LITTLE_ENDIAN (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#elif defined(LITTLE_ENDIAN)
+#  define HOST_LITTLE_ENDIAN 1
+#else
+#  define HOST_LITTLE_ENDIAN 0
+#endif
+
 #define LOAD_BASE	0x0
 
+/*
+ * The emulator state below starts out as a tentative definition in every
+ * translation unit; the native build relies on -fcommon making those
+ * common symbols that the linker merges. wasm-ld has no common symbols
+ * (it reports them as undefined), so on __EMSCRIPTEN__ the state is
+ * defined in the PART1 unit and declared in PART2. The wasm build
+ * therefore compiles the generated source WITHOUT -fcommon; see
+ * build-wasm.sh.
+ */
+#ifdef __EMSCRIPTEN__
+# ifdef PART2
+#  define FE2_STATE extern
+# else
+#  define FE2_STATE
+# endif
+#else
+# define FE2_STATE
+#endif
+
 # ifdef M68K_DEBUG
-int line_no;
+FE2_STATE int line_no;
 # endif /* M68K_DEBUG */
 
 #define MEM_SIZE	(0x110000)
@@ -43,19 +92,19 @@ union Reg {
 };
 
 /* m68000 state ----------------------------------------------------- */
-s8 m68kram[MEM_SIZE];
-union Reg Regs[16];
+FE2_STATE s8 m68kram[MEM_SIZE];
+FE2_STATE union Reg Regs[16];
 /* status flags */
 /* it is an optimisation that instead of having a Z (zero) flag we have
  * an nZ (not zero) flag, because this way we can usually just stick
  * the result in nZ. */
-s32 N,nZ,V,C,X;
-s32 bN,bnZ,bV,bC,bX;
-s32 rdest; /* return address from interrupt. zero if none in service */
-s32 exceptions_pending;
-s32 exceptions_pending_nums[32];
-u32 exception_handlers[32];
-s8 *STRam;
+FE2_STATE s32 N,nZ,V,C,X;
+FE2_STATE s32 bN,bnZ,bV,bC,bX;
+FE2_STATE s32 rdest; /* return address from interrupt. zero if none in service */
+FE2_STATE s32 exceptions_pending;
+FE2_STATE s32 exceptions_pending_nums[32];
+FE2_STATE u32 exception_handlers[32];
+FE2_STATE s8 *STRam;
 
 #ifdef M68K_DEBUG
 #define BOUNDS_CHECK
@@ -77,7 +126,7 @@ static inline u32 do_get_mem_long(u32 *a)
 	u32 val = *a;
 	__asm__ ("bswap	%0\n":"=r"(val):"0"(val));
 	return val;
-#elif LITTLE_ENDIAN
+#elif HOST_LITTLE_ENDIAN
     u8 *b = (u8 *)a;
     return (*b << 24) | (*(b+1) << 16) | (*(b+2) << 8) | (*(b+3));
 #else
@@ -91,7 +140,7 @@ static inline u16 do_get_mem_word(u16 *a)
 	u16 val = *a;
 	__asm__ ("rorw $8,%0" : "=q" (val) :  "0" (val));
 	return val;
-#elif LITTLE_ENDIAN
+#elif HOST_LITTLE_ENDIAN
     u8 *b = (u8 *)a;
     return (*b << 8) | (*(b+1));
 #else
@@ -109,7 +158,7 @@ static inline void do_put_mem_long(u32 *a, u32 v)
 #ifdef __i386__
 	__asm__ ("bswap	%0\n":"=r"(v):"0"(v));
 	*a = v;
-#elif LITTLE_ENDIAN
+#elif HOST_LITTLE_ENDIAN
     u8 *b = (u8 *)a;
     
     *b = v >> 24;
@@ -126,7 +175,7 @@ static inline void do_put_mem_word(u16 *a, u16 v)
 #ifdef __i386__
 	__asm__ ("rorw $8,%0" : "=q" (v) :  "0" (v));
 	*a = v;
-#elif LITTLE_ENDIAN
+#elif HOST_LITTLE_ENDIAN
     u8 *b = (u8 *)a;
     
     *b = v >> 8;

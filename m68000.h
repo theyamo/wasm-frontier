@@ -18,7 +18,7 @@ extern HOSTCALL hcalls [];
 extern char *STRam;
 extern int line_no;
 
-extern int Init680x0 ();
+extern void Init680x0 ();
 extern void Start680x0 ();
 extern void FlagException (int num);
 extern int GetReg (int reg);

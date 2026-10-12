@@ -21,6 +21,9 @@
 #define COMPILE_i386	1
 #define COMPILE_MAX	2
 
+/* set by as68k.c when --output-cfunc is given; consumed by output_c.c */
+extern int c_block_mode;
+
 enum M68K_OPS {
 	OP_NONE, OP_JMP, OP_BCHG, OP_BCLR, OP_BSET, OP_BTST, OP_MULS, OP_MULU,
 	OP_AND, OP_OR, OP_XOR, OP_NOT, OP_NEGX, OP_NEG, OP_DIVU, OP_DIVS, OP_ASL,

@@ -104,6 +104,26 @@ FILE *c_out2; /* writing functions here */
 /* useless stats */
 static int num_funcs;
 
+/*
+ * --output-cfunc ("block function") mode.
+ *
+ * Instead of emitting one giant switch over the 68k PC (the normal
+ * --output-c behaviour, which produces a single function large enough
+ * to break LLVM's wasm backend), emit one C function per basic block
+ * plus a small dispatch loop:
+ *
+ *	dispatch: switch (jdest) { case A: __BA (); break; ... }
+ *		  if (g_exc) { ... } goto dispatch;
+ *
+ * Every instruction emitter below is reused verbatim; only the
+ * control-flow driver and the labels/branches differ.
+ */
+int c_block_mode = 0;
+static int block_open = 0;		/* a block function body is open */
+static int block_terminated = 0;	/* last op emitted ended control flow */
+static int *block_addrs = NULL;		/* block entry addrs, for dispatch */
+static int num_block_addrs = 0, max_block_addrs = 0;
+
 #define SWAP_COUT	{ f_temp = c_out; c_out = c_out2; c_out2 = f_temp; }
 
 static void output_op (op_t *op, op_t *next);
@@ -132,14 +152,71 @@ const char *c_ssizes[] = { "s8", "s16", "s32" };
 const char *mem_read_funcs[] = { "rdbyte", "rdword", "rdlong" };
 const char *mem_write_funcs[] = { "wrbyte", "wrword", "wrlong" };
 
+static void block_addr_add (int addr)
+{
+	int i;
+	for (i = 0; i < num_block_addrs; i++)
+		if (block_addrs[i] == addr) return;
+	if (num_block_addrs == max_block_addrs) {
+		max_block_addrs = max_block_addrs ? max_block_addrs * 2 : 1024;
+		block_addrs = realloc (block_addrs, max_block_addrs * sizeof (int));
+	}
+	block_addrs[num_block_addrs++] = addr;
+}
+
+/* Close the previous block function (if any) and open a new one at addr.
+ * A non-terminated block falls through to the next block, which under the
+ * dispatch loop means "set jdest to the next block and return". */
+static void block_open_fn (int addr)
+{
+	if (block_open) {
+		if (!block_terminated) {
+			cln ("jdest = 0x%x;", addr);
+			cln ("return;");
+		}
+		cout ("}\n\n");
+	}
+	{
+		char name[32];
+		snprintf (name, sizeof (name), "__B%x", addr);
+		add_fixup (0, C_FUNC, name);
+		block_addr_add (addr);
+		cout ("void __B%x (void)\n{\n", addr);
+	}
+	block_open = 1;
+	block_terminated = 0;
+}
+
 void c_label (const char *lab)
 {
+	if (c_block_mode) {
+		/*
+		 * In block mode a label is a block entry point, but the block
+		 * function itself is opened (by address) in c_addr_label. We
+		 * only need the address registered so the dispatch switch and
+		 * the __D<label> address macros exist.
+		 */
+		add_fixup (0, C_ADDR, lab);
+		return;
+	}
 	cout ("__N%s:\n", lab);
 	add_fixup (0, C_ADDR, lab);
 }
 
 void c_addr_label (int labelled)
 {
+	if (c_block_mode) {
+		if (labelled || return_target || (get_bitpos () == 0x1c)) {
+			block_open_fn (get_bitpos ());
+		}
+		cln ("#ifdef M68K_DEBUG");
+		cln ("	line_no = %d;", line_no);
+#ifdef DUMP_LOADS_OF_CRAP
+		cln ("	DumpRegsChanged ();");
+#endif /* DUMP_LOADS_OF_CRAP */
+		cln ("#endif");
+		return;
+	}
 	if (labelled || return_target || (get_bitpos () == 0x1c)) {
 		cout ("\tcase (0x%x):\n", get_bitpos ());
 	}
@@ -169,11 +246,48 @@ void c_begin (const char *src_filename, const char *bin_filename)
 	cln ("STRam = &m68kram[0];");
 	cln ("load_binfile (\"%s\");", bin_filename);
 	cout ("}\n");
-	
+
+	if (c_block_mode) {
+		/*
+		 * Block functions are separate C functions, so the emulated PC
+		 * (jdest) and the "exception is pending" flag must be at file
+		 * scope. The dispatch driver and __handle_exception are emitted
+		 * in c_end, once every block address is known.
+		 */
+		cout ("static s32 jdest = 0x1c;\n");
+		cout ("static int g_exc = 0;\n");
+		cout ("static int g_yield = 0;\n");
+		return;
+	}
+
+	/*
+	 * On wasm (emscripten) the emulator loop must periodically RETURN to
+	 * the host so the JS event loop (input, frame callbacks) can run;
+	 * Start680x0() is then re-entered from JS. That requires jdest (the
+	 * 68k PC) to be static and the stack-pointer init to happen only on
+	 * the first entry. On native this collapses to the original code.
+	 */
 	cout ("void Start680x0 ()\n{\n");
-	cout ("\ts32 i, jdest = 0x1c;\n");
-	cout ("\tRegs[15]._u32 = MEM_SIZE;\n\n");
-	cout ("jumptable:\n\tswitch (jdest) {\n");
+	cout ("\ts32 i;\n");
+	cout ("#ifdef __EMSCRIPTEN__\n");
+	cout ("\tstatic s32 jdest = 0x1c;\n");
+	cout ("\tstatic s32 fe2_started = 0;\n");
+	cout ("\tif (!fe2_started) {\n");
+	cout ("\t\tRegs[15]._u32 = MEM_SIZE;\n");
+	cout ("\t\tfe2_started = 1;\n");
+	cout ("\t}\n");
+	cout ("\twasm_68k_entry ();\n");
+	cout ("#else\n");
+	cout ("\ts32 jdest = 0x1c;\n");
+	cout ("\tRegs[15]._u32 = MEM_SIZE;\n");
+	cout ("#endif\n\n");
+	cout ("jumptable:\n");
+	cout ("#ifdef __EMSCRIPTEN__\n");
+	cout ("\twasm_68k_trace (jdest);\n");
+	cout ("\t/* every 68k instruction passes through here; time-check every 128 */\n");
+	cout ("\tif (((++wasm_yield_cnt) & 0x7f) == 0 && wasm_68k_yield_check ()) return;\n");
+	cout ("#endif\n");
+	cout ("\tswitch (jdest) {\n");
 }
 
 void c_end (const char *src_filename)
@@ -183,6 +297,7 @@ void c_end (const char *src_filename)
 	FILE *f;
 	struct Fixup *fix;
 	struct Label *lab;
+	int x;
 
 	/* remember to do last pending instruction */
 	next_op_type = OP_NONE;
@@ -249,13 +364,87 @@ void c_end (const char *src_filename)
 	fclose (f);
 	remove (buf);
 
+	if (c_block_mode) {
+		/* Close the final, still-open block function. */
+		if (!block_terminated) {
+			cln ("#ifdef __EMSCRIPTEN__");
+			cln ("	wasm_68k_end_of_switch ();");
+			cln ("#endif");
+			cln ("return;");
+		}
+		cout ("}\n\n");
+
+		/* The dispatch driver: a tiny switch that just calls the right
+		 * block function, plus pending-exception handling. */
+		cout ("static void __handle_exception (void);\n\n");
+		cout ("void Start680x0 (void)\n{\n");
+		cout ("#ifdef __EMSCRIPTEN__\n");
+		cln ("static int fe2_started = 0;");
+		cln ("if (!fe2_started) { Regs[15]._u32 = MEM_SIZE; fe2_started = 1; }");
+		cln ("wasm_68k_entry ();");
+		cout ("#else\n");
+		cln ("Regs[15]._u32 = MEM_SIZE;");
+		cout ("#endif\n");
+		/*
+		 * jdest is a file-scope static initialised to 0x1c. It must NOT
+		 * be reset here: on wasm the guest re-enters Start680x0() after a
+		 * yield and has to resume where it left off.
+		 */
+		cout ("dispatch:\n");
+		cout ("#ifdef __EMSCRIPTEN__\n");
+		cln ("wasm_68k_trace (jdest);");
+		cln ("/* every block passes through here; time-check every 128 */");
+		cln ("if (((++wasm_yield_cnt) & 0x7f) == 0 && wasm_68k_yield_check ()) return;");
+		cout ("#endif\n");
+		cln ("switch (jdest) {");
+		for (x = 0; x < num_block_addrs; x++) {
+			cln ("case 0x%x: __B%x (); break;", block_addrs[x], block_addrs[x]);
+		}
+		cln ("default:");
+		cln ("#ifdef __EMSCRIPTEN__");
+		cln ("	wasm_68k_bad_jump (jdest, rdest);");
+		cln ("#endif");
+		cln ("	printf (\"Bad jump target: $%%x (rdest=$%%x).\\n\", jdest, rdest);");
+		cln ("	abort ();");
+		cln ("}");
+		cln ("#ifdef __EMSCRIPTEN__");
+		cln ("if (g_yield) { g_yield = 0; return; }");
+		cln ("#endif");
+		cln ("if (g_exc) { g_exc = 0; __handle_exception (); }");
+		cln ("goto dispatch;");
+		cout ("}\n\n");
+
+		cout ("static void __handle_exception (void)\n{\n");
+		cln ("int i;");
+		cln ("for (i=0; i<32; i++) {");
+		cln ("	if (exceptions_pending & ((1<<i))) {");
+		cln ("		jdest = exception_handlers[i];");
+		cln ("		if (!--exceptions_pending_nums[i]) exceptions_pending ^= 1<<i;");
+		cln ("		bN=N; bnZ=nZ; bV=V; bC=C; bX=X;");
+		cln ("		return;");
+		cln ("	}");
+		cln ("}");
+		cln ("/* shouldn't get here... */");
+		cln ("#ifdef __EMSCRIPTEN__");
+		cln ("	wasm_68k_shouldnt_get_here ();");
+		cln ("#endif");
+		cln ("jdest = rdest;");
+		cout ("}\n");
+		cout ("#endif /* PART1 */\n");
+	} else {
 	/* and then computed jump table */
+	cln ("#ifdef __EMSCRIPTEN__");
+	cln ("	wasm_68k_end_of_switch ();");
+	cln ("#endif");
 	cln ("goto end_;");
 	cout ("\t\tdefault: \n");
 	cln ("#ifdef M68K_DEBUG");
 	cln ("	printf (\"Bad jump target at line %%d: $%%x (rdest=$%%x).\\n\", line_no, jdest, rdest);");
 	cln ("#else");
 	cln ("	printf (\"Bad jump target: $%%x (rdest=$%%x).\\n\", jdest, rdest);");
+	cln ("#endif");
+	cln ("#ifdef __EMSCRIPTEN__");
+	cln ("	wasm_68k_bad_jump (jdest, rdest);");
 	cln ("#endif");
 	cln ("abort ();");
 	cout ("	}\n\n");
@@ -273,11 +462,15 @@ void c_end (const char *src_filename)
 	cln ("	}");
 	cln ("}");
 	cln ("/* shouldn't get here... */");
+	cln ("#ifdef __EMSCRIPTEN__");
+	cln ("	wasm_68k_shouldnt_get_here ();");
+	cln ("#endif");
 	cln ("jdest = rdest;");
 	cln ("goto jumptable;\n");
 	
 	cout ("end_:\treturn;\n}\n");
 	cout ("#endif /* PART1 */\n");
+	}
 
 	fclose (c_out);
 	
@@ -589,7 +782,48 @@ void c_jump_e (ea_t *ea)
 	char buf[256];
 	if (gen_mode != GEN_CALL) return;
 	c_ea_get_address (ea, buf);
+	if (c_block_mode) {
+		/* conditional: falls through to the next instruction, so it does
+		 * NOT terminate the block.
+		 *
+		 * NB: no wasm_68k_vbl()/yield here. Yielding mid-block would make
+		 * the block re-run from its start on re-entry (the emulated PC is
+		 * unchanged), re-applying side effects before the branch and
+		 * corrupting guest state. The dispatch back-edge is a clean yield
+		 * point instead, and it delivers VBLs too. */
+		cln ("{");
+		cln ("if ((exceptions_pending) && (rdest == 0)) {");
+		if (((ea->mode == 7) && (ea->reg == 1)) ||
+		    ((ea->mode == 7) && (ea->reg == 2))) {
+			cln ("	rdest = __D%s;", ea->imm.label);
+		} else {
+			cln ("	rdest = %s;", buf);
+			c_postea (ea);
+		}
+		cln ("	g_exc = 1;");
+		cln ("	return;");
+		cln ("} else {");
+		if (((ea->mode == 7) && (ea->reg == 1)) ||
+		    ((ea->mode == 7) && (ea->reg == 2))) {
+			cln ("	jdest = __D%s;", ea->imm.label);
+		} else {
+			cln ("	jdest = %s;", buf);
+			c_postea (ea);
+		}
+		cln ("	return;");
+		cln ("}}");
+		return;
+	}
 	cln ("{");
+	/*
+	 * wasm: the 68k branch sites are where the interpreter already looks
+	 * for pending interrupts, so that is also the right place to generate
+	 * the 20ms VBL — and to hand control back to the browser when the
+	 * guest is idling (see wasm_68k_vbl() in wasm/shim.c).
+	 */
+	cln ("#ifdef __EMSCRIPTEN__");
+	cln ("	if (wasm_68k_vbl ()) return;");
+	cln ("#endif");
 	cln ("if ((exceptions_pending) && (rdest == 0)) {");
 	
 	if (((ea->mode == 7) && (ea->reg == 1)) ||
@@ -619,6 +853,20 @@ void c_jump (ea_t *ea)
 	if (gen_mode != GEN_CALL) return;
 	c_ea_get_address (ea, buf);
 	
+	if (c_block_mode) {
+		block_terminated = 1;
+		cln ("{");
+		if (((ea->mode == 7) && (ea->reg == 1)) ||
+		    ((ea->mode == 7) && (ea->reg == 2))) {
+			cln ("	jdest = __D%s;", ea->imm.label);
+		} else {
+			cln ("	jdest = %s;", buf);
+			c_postea (ea);
+		}
+		cln ("	return;");
+		cln ("}");
+		return;
+	}
 	cln ("{");
 	if (((ea->mode == 7) && (ea->reg == 1)) ||
 	    ((ea->mode == 7) && (ea->reg == 2))) {
@@ -1667,6 +1915,17 @@ void c_func_bcc (ea_t *dest, int cond)
 void c_func_dbcc (const char *label, int cond, int reg)
 {
 	if (gen_mode != GEN_CALL) return;
+	if (c_block_mode) {
+		/* falls through when the loop is done, so not terminating */
+		if (cond == 0) {
+			cln ("if (--Regs[%d]._s16 != -1) { jdest = __D%s; return; }\n", reg, label);
+		} else {
+			cout ("\tif ((!");
+			c_eval_cond (cond);
+			cout (") && (--Regs[%d]._s16 != -1)) { jdest = __D%s; return; }\n", reg, label);
+		}
+		return;
+	}
 	if (cond == 0) {
 		cln ("if (--Regs[%d]._s16 != -1) goto __N%s;\n", reg, label);
 	} else {
@@ -1718,6 +1977,14 @@ void c_func_ext (int reg, int size)
 void c_func_rte ()
 {
 	if (gen_mode != GEN_CALL) return;
+	if (c_block_mode) {
+		block_terminated = 1;
+		cln ("N=bN; nZ=bnZ; V=bV; C=bC; X=bX;");
+		cln ("jdest = rdest;");
+		cln ("rdest = 0;");
+		cln ("return;");
+		return;
+	}
 	cln ("N=bN; nZ=bnZ; V=bV; C=bC; X=bX;");
 	cln ("jdest = rdest;");
 	cln ("rdest = 0;");
@@ -1727,6 +1994,13 @@ void c_func_rte ()
 void c_func_rts ()
 {
 	if (gen_mode != GEN_CALL) return;
+	if (c_block_mode) {
+		block_terminated = 1;
+		cln ("jdest = rdlong (Regs[15]._u32);");
+		cln ("Regs[15]._s32 += 4;");
+		cln ("return;");
+		return;
+	}
 	cln ("jdest = rdlong (Regs[15]._u32);");
 	cln ("Regs[15]._s32 += 4;");
 	cln ("goto jumptable;");
