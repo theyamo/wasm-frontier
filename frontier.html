@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Final Frontier</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  #hint {
+    position: fixed; left: 8px; bottom: 6px; color: #666;
+    font: 12px/1.4 monospace; pointer-events: none; user-select: none;
+  }
+</style>
+</head>
+<body>
+<!-- the wasm shim (wasm/shim.c + wasm/glue.js) picks this canvas up -->
+<canvas id="canvas" tabindex="0"></canvas>
+<div id="hint">click the screen to focus &middot; right-button hold = mouse grab &middot; F11 fullscreen &middot; F12 renderer</div>
+<script src="frontier.js"></script>
+</body>
+</html>
